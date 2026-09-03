@@ -1,0 +1,66 @@
+# ocp-g 前端：Knative Service（scale-to-zero，平時零成本）
+# DB 連線走 ocp-a 的 TLS passthrough Route：host=db route、port=443、sslmode=require
+---
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: frontend
+  namespace: bursting-demo
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/min-scale: "0"     # 平時歸零
+        autoscaling.knative.dev/max-scale: "20"
+        autoscaling.knative.dev/target: "20"       # 每 pod 目標併發 20
+        autoscaling.knative.dev/scale-down-delay: "1m"
+    spec:
+      containerConcurrency: 0
+      containers:
+        - image: registry.access.redhat.com/ubi9/python-311:latest
+          command:
+            - /bin/sh
+            - -c
+            - pip install --quiet flask "psycopg[binary]" && python /opt/app/app.py
+          env:
+            - name: SITE
+              value: "ocp-g(GCP)"
+            - name: DB_HOST
+              value: db.bursting.demo.example.com   # ← ocp-a 的 postgres Route host
+            - name: DB_PORT
+              value: "443"                          # passthrough route 走 router 的 443
+            - name: DB_SSLMODE
+              value: require
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef: { name: db-credentials, key: user }
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: db-credentials, key: password }
+            - name: DB_NAME
+              valueFrom:
+                secretKeyRef: { name: db-credentials, key: database }
+          ports:
+            - containerPort: 8080
+          resources:
+            requests: { cpu: 200m, memory: 256Mi }
+            limits: { cpu: "1", memory: 512Mi }
+          volumeMounts:
+            - name: code
+              mountPath: /opt/app
+      volumes:
+        - name: code
+          configMap:
+            name: frontend-code
+---
+# 讓 ocp-g 的 Knative 前端也接受全域統一域名（Route 53 加權切過來的流量）
+apiVersion: serving.knative.dev/v1beta1
+kind: DomainMapping
+metadata:
+  name: app.bursting.demo.example.com   # ← 改成你的全域 app domain
+  namespace: bursting-demo
+spec:
+  ref:
+    apiVersion: serving.knative.dev/v1
+    kind: Service
+    name: frontend

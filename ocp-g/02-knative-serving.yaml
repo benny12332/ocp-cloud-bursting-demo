@@ -1,0 +1,7 @@
+# Knative Serving 實例（等 Serverless Operator 裝好後再 apply）
+apiVersion: operator.knative.dev/v1beta1
+kind: KnativeServing
+metadata:
+  name: knative-serving
+  namespace: knative-serving
+spec: {}

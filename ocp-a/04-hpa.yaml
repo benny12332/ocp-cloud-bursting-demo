@@ -1,0 +1,37 @@
+# 第一層擴展：Pod 層級 HPA
+# CPU 使用率超過 requests 的 60% 就加 replica，最多 10 個。
+# maxReplicas × requests(500m) 設計成足以把 worker 節點塞到觸發叢集告警。
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: frontend
+  namespace: bursting-demo
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: frontend
+  minReplicas: 1
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 60
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0     # demo：立刻往上擴，反應快
+      policies:
+        - type: Pods
+          value: 3
+          periodSeconds: 15
+    scaleDown:
+      stabilizationWindowSeconds: 120   # 壓力消失 2 分鐘後才縮回

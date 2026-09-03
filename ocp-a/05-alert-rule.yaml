@@ -1,0 +1,26 @@
+# 第二層觸發：叢集節點壓力告警（放在 openshift-monitoring，由平台 Prometheus 評估）
+# worker 節點平均 CPU 使用率連續 2 分鐘 > 65% → 發出 ClusterCPUPressure
+# firing → Alertmanager webhook → burst-controller → Route 53 分流到 ocp-g
+# resolved → burst-controller 把權重收回 → ocp-g 沒流量後 Knative 自動 scale-to-zero（回縮機制）
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: bursting-demo-rules
+  namespace: openshift-monitoring
+spec:
+  groups:
+    - name: bursting.rules
+      rules:
+        - alert: ClusterCPUPressure
+          expr: |
+            (1 - avg(
+              rate(node_cpu_seconds_total{mode="idle"}[2m])
+              * on(instance) group_left()
+                (max by (instance) (label_replace(kube_node_role{role="worker"}, "instance", "$1", "node", "(.+)")))
+            )) * 100 > 65
+          for: 2m
+          labels:
+            severity: warning
+            demo: bursting
+          annotations:
+            summary: "Worker 節點平均 CPU 超過 65%，觸發 cloud bursting 分流到 ocp-g"

@@ -1,0 +1,100 @@
+# PostgreSQL（sclorg image，對 OpenShift 任意 UID 友善）
+# 對外用 TLS passthrough Route 提供給 ocp-g 的前端連線。
+# 前置：先建立 db 密碼 secret 與 TLS 憑證 secret（見 README 步驟 3）
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-ssl-cfg
+  namespace: bursting-demo
+data:
+  ssl.cfg: |
+    ssl = on
+    ssl_cert_file = '/opt/app-root/tls/tls.crt'
+    ssl_key_file = '/opt/app-root/tls/tls.key'
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: bursting-demo
+  labels:
+    app: postgres
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: quay.io/sclorg/postgresql-15-c9s:latest
+          env:
+            - name: POSTGRESQL_USER
+              valueFrom:
+                secretKeyRef: { name: db-credentials, key: user }
+            - name: POSTGRESQL_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: db-credentials, key: password }
+            - name: POSTGRESQL_DATABASE
+              valueFrom:
+                secretKeyRef: { name: db-credentials, key: database }
+          ports:
+            - containerPort: 5432
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/pgsql/data
+            - name: ssl-cfg
+              mountPath: /opt/app-root/src/postgresql-cfg
+            - name: tls
+              mountPath: /opt/app-root/tls
+          resources:
+            requests: { cpu: 250m, memory: 512Mi }
+            limits: { cpu: "1", memory: 1Gi }
+          readinessProbe:
+            exec:
+              command: ["/usr/libexec/check-container"]
+            initialDelaySeconds: 10
+      volumes:
+        - name: data
+          emptyDir: {}          # demo 用；正式環境請改 PVC
+        - name: ssl-cfg
+          configMap:
+            name: postgres-ssl-cfg
+        - name: tls
+          secret:
+            secretName: postgres-tls
+            defaultMode: 0640   # key 檔權限需符合 postgres 要求（root 擁有 + group 可讀）
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: bursting-demo
+spec:
+  selector:
+    app: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+---
+# TLS passthrough Route：router 依 SNI 直接把 TLS 流量轉給 postgres（走 443）
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: postgres
+  namespace: bursting-demo
+spec:
+  host: db.bursting.demo.example.com   # ← 改成你的 domain
+  to:
+    kind: Service
+    name: postgres
+  port:
+    targetPort: postgres
+  tls:
+    termination: passthrough

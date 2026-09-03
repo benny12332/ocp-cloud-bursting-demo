@@ -1,0 +1,199 @@
+# 前端應用：小型 Flask app
+#   /       → 回報自己在哪個 site / pod（demo 時觀察分流用）
+#   /burn   → 燒 CPU（觸發 HPA 用），?ms=500 控制每個 request 燒多久
+#   /db     → 寫入並讀取 PostgreSQL（驗證 ocp-g 跨雲連回 DB）
+# 兩個叢集共用同一份 app code（ocp-g 用 Knative Service 跑，見 ocp-g/04）
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: frontend-code
+  namespace: bursting-demo
+data:
+  app.py: |
+    import os, time, socket
+    from flask import Flask, request, jsonify, make_response
+
+    app = Flask(__name__)
+    SITE = os.environ.get("SITE", "unknown")
+    POD = socket.gethostname()
+    IS_GCP = "gcp" in SITE.lower()
+    COLOR = "#1a73e8" if IS_GCP else "#e8590c"
+    CLOUD = "GCP &mdash; Burst" if IS_GCP else "AWS &mdash; Primary"
+
+    PAGE = """<!doctype html><html><head><meta charset="utf-8">
+    <title>Cloud Bursting Demo</title>
+    <style>
+      body{margin:0;font-family:system-ui,sans-serif;color:#fff;background:__COLOR__;
+           display:flex;flex-direction:column;align-items:center;min-height:100vh;
+           transition:background 1s}
+      .card{background:rgba(0,0,0,.28);padding:1.2rem 2.5rem;border-radius:14px;
+            margin-top:2.5rem;text-align:center;max-width:85vw}
+      h1{font-size:3.2rem;margin:.2em 0}
+      .pod{opacity:.85;font-size:.95rem}
+      #strip{display:flex;flex-wrap:wrap;gap:5px;justify-content:center;
+             max-width:70vw;margin-top:1rem;min-height:26px}
+      .dot{width:20px;height:20px;border-radius:50%;border:2px solid #fff}
+      .aws{background:#e8590c}.gcp{background:#1a73e8}
+      #stats{font-size:1.3rem;margin-top:.8rem}
+    </style></head><body>
+    <div class="card"><div>這個頁面由誰服務？</div><h1>__CLOUD__</h1>
+      <div class="pod">pod: __POD__</div></div>
+    <div class="card"><div>即時請求落點（每 2 秒一發，最近 60 個）</div>
+      <div id="strip"></div><div id="stats"></div></div>
+    <script>
+      let c={aws:0,gcp:0};
+      async function ping(){
+        try{
+          const r=await fetch('/whoami?ts='+Date.now(),{cache:'no-store'});
+          const d=await r.json();
+          const g=d.site.toLowerCase().includes('gcp');
+          c[g?'gcp':'aws']++;
+          const dot=document.createElement('div');
+          dot.className='dot '+(g?'gcp':'aws');
+          dot.title=d.site+' / '+d.pod;
+          const s=document.getElementById('strip');
+          s.prepend(dot);
+          while(s.children.length>60)s.removeChild(s.lastChild);
+          document.getElementById('stats').textContent=
+            'AWS: '+c.aws+'  |  GCP: '+c.gcp;
+        }catch(e){}
+      }
+      setInterval(ping,2000);ping();
+    </script></body></html>"""
+
+    def db_conn():
+        import psycopg
+        return psycopg.connect(
+            host=os.environ["DB_HOST"],
+            port=int(os.environ.get("DB_PORT", "5432")),
+            user=os.environ["DB_USER"],
+            password=os.environ["DB_PASSWORD"],
+            dbname=os.environ["DB_NAME"],
+            sslmode=os.environ.get("DB_SSLMODE", "disable"),
+            connect_timeout=5,
+        )
+
+    @app.route("/")
+    def index():
+        html = PAGE.replace("__COLOR__", COLOR).replace("__CLOUD__", CLOUD).replace("__POD__", POD)
+        resp = make_response(html)
+        resp.headers["Cache-Control"] = "no-store"
+        resp.headers["Connection"] = "close"   # 避免 keep-alive 黏在同一個叢集
+        return resp
+
+    @app.route("/whoami")
+    def whoami():
+        resp = jsonify(site=SITE, pod=POD)
+        resp.headers["Cache-Control"] = "no-store"
+        resp.headers["Connection"] = "close"
+        return resp
+
+    @app.route("/burn")
+    def burn():
+        ms = min(int(request.args.get("ms", "500")), 5000)
+        end = time.time() + ms / 1000.0
+        x = 0
+        while time.time() < end:
+            x += 1
+        return jsonify(site=SITE, pod=POD, burned_ms=ms)
+
+    @app.route("/db")
+    def db():
+        try:
+            with db_conn() as conn, conn.cursor() as cur:
+                cur.execute("CREATE TABLE IF NOT EXISTS hits (id serial PRIMARY KEY, site text, pod text, ts timestamptz DEFAULT now())")
+                cur.execute("INSERT INTO hits (site, pod) VALUES (%s, %s)", (SITE, POD))
+                cur.execute("SELECT site, count(*) FROM hits GROUP BY site")
+                rows = dict(cur.fetchall())
+            return jsonify(site=SITE, pod=POD, db="ok", hits_by_site=rows)
+        except Exception as e:
+            return jsonify(site=SITE, pod=POD, db="error", detail=str(e)), 500
+
+    app.run(host="0.0.0.0", port=8080, threaded=True)
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: bursting-demo
+  labels:
+    app: frontend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: frontend
+  template:
+    metadata:
+      labels:
+        app: frontend
+    spec:
+      containers:
+        - name: frontend
+          image: registry.access.redhat.com/ubi9/python-311:latest
+          command:
+            - /bin/sh
+            - -c
+            - pip install --quiet flask "psycopg[binary]" && python /opt/app/app.py
+          env:
+            - name: SITE
+              value: "ocp-a(AWS)"
+            - name: DB_HOST
+              value: postgres.bursting-demo.svc.cluster.local
+            - name: DB_PORT
+              value: "5432"
+            - name: DB_SSLMODE
+              value: disable
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef: { name: db-credentials, key: user }
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: db-credentials, key: password }
+            - name: DB_NAME
+              valueFrom:
+                secretKeyRef: { name: db-credentials, key: database }
+          ports:
+            - containerPort: 8080
+          # requests 是 HPA 百分比的分母，也決定塞爆節點的速度——demo 的關鍵參數
+          resources:
+            requests: { cpu: 500m, memory: 256Mi }
+            limits: { cpu: "1", memory: 512Mi }
+          readinessProbe:
+            httpGet: { path: /, port: 8080 }
+            initialDelaySeconds: 15
+          volumeMounts:
+            - name: code
+              mountPath: /opt/app
+      volumes:
+        - name: code
+          configMap:
+            name: frontend-code
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  namespace: bursting-demo
+spec:
+  selector:
+    app: frontend
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+# 前端 Route：host 用全域統一域名（Route 53 加權指到兩個叢集的同一個 host）
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: frontend
+  namespace: bursting-demo
+spec:
+  host: app.bursting.demo.example.com   # ← 改成你的 domain
+  to:
+    kind: Service
+    name: frontend
+  port:
+    targetPort: http

@@ -1,0 +1,18 @@
+# Alertmanager 設定片段（不能直接 oc apply！）
+# 平台 Alertmanager 的設定存在 openshift-monitoring/alertmanager-main secret。
+# 依 README 步驟 6 把以下 route + receiver 合併進 alertmanager.yaml 後回寫。
+#
+# route:
+#   routes:
+#     - matchers:
+#         - alertname = ClusterCPUPressure
+#       receiver: burst-webhook
+#       group_wait: 10s
+#       group_interval: 30s
+#       repeat_interval: 5m
+#
+# receivers:
+#   - name: burst-webhook
+#     webhook_configs:
+#       - url: http://burst-controller.bursting-demo.svc.cluster.local:8080/alert
+#         send_resolved: true    # ← 關鍵！回縮機制靠 resolved 通知
