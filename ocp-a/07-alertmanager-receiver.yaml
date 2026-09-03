@@ -14,5 +14,5 @@
 # receivers:
 #   - name: burst-webhook
 #     webhook_configs:
-#       - url: http://burst-controller.bursting-demo.svc.cluster.local:8080/alert
+#       - url: http://burst-controller.${NAMESPACE}.svc.cluster.local:8080/alert
 #         send_resolved: true    # ← 關鍵！回縮機制靠 resolved 通知

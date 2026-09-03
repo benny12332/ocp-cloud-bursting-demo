@@ -1,0 +1,66 @@
+; =====================================================================
+;  Cloud Bursting Demo 參數檔
+;  使用方式：cp demo.ini.example demo.ini，填好後所有 script / README 指令
+;  都會自動讀取（README 指令請先執行 source scripts/env.sh）
+;  demo.ini 已列入 .gitignore，裡面的 AWS 金鑰不會被 commit
+; =====================================================================
+
+[dns]
+; Route 53 hosted zone 的網域與 ID（必填）
+BASE_DOMAIN     = demo.example.com
+HOSTED_ZONE_ID  = ZXXXXXXXXXXXXX
+; 以下四個留空則自動用 app.<BASE_DOMAIN> / app-aws.<…> / app-gcp.<…> / db.<…>
+APP_HOST        =          ; 全域入口（加權 CNAME ×2，觀眾打的網址）
+AWS_ENTRY_HOST  =          ; CNAME → ocp-a router ELB
+GCP_ENTRY_HOST  =          ; A     → ocp-g router LB IP
+DB_HOST         =          ; CNAME → ocp-a router ELB（postgres passthrough）
+DNS_TTL         = 15       ; 加權記錄 TTL（秒），越短切換越快
+
+[clusters]
+CTX_A           = ocp-a    ; oc 的 context 名稱（AWS 主叢集）
+CTX_G           = ocp-g    ; oc 的 context 名稱（GCP 突發叢集）
+KUBECONFIG_A    = ~/ocp-a/auth/kubeconfig   ; watch-demo.sh 用
+KUBECONFIG_G    = ~/ocp-g/auth/kubeconfig
+NAMESPACE       = bursting-demo
+; 兩邊 router 的入口位址；留空則 setup-dns.sh 會自動用 oc 查（需已登入）
+AWS_ROUTER_HOSTNAME =
+GCP_ROUTER_IP       =
+
+[aws]
+; burst-controller 用的 IAM key，只需該 zone 的 route53:ChangeResourceRecordSets / ListResourceRecordSets
+AWS_REGION            = us-east-1
+AWS_ACCESS_KEY_ID     =
+AWS_SECRET_ACCESS_KEY =
+
+[database]
+DB_USER     = demo
+DB_PASSWORD = demo1234
+DB_NAME     = demodb
+DISPLAY_TZ  = Asia/Taipei   ; 網頁上留言時間的顯示時區
+
+[scaling]
+; 第一層：HPA（Pod 層）
+HPA_MIN_REPLICAS     = 1
+HPA_MAX_REPLICAS     = 10
+HPA_CPU_PERCENT      = 60
+HPA_MEM_PERCENT      = 80
+; 第二層：叢集告警（worker 平均 CPU > N% 持續 FOR）→ bursting
+CPU_PRESSURE_PERCENT = 65
+CPU_PRESSURE_FOR     = 2m       ; demo 想快一點可改 1m
+; bursting 時如何分流：proportional = 依兩邊 ready pod 數比例動態調整（每 BURST_RECONCILE_SECONDS 秒）
+;                     fixed        = 固定用 BURST_AWS_WEIGHT / BURST_GCP_WEIGHT
+; （告警 resolved 後一律回 100 / 0）
+BURST_MODE           = proportional
+; fixed 模式的權重；proportional 模式下是剛觸發、ocp-g 還沒 pod 時的起手權重（用來喚醒 Knative）
+BURST_AWS_WEIGHT     = 50
+BURST_GCP_WEIGHT     = 50
+BURST_GCP_MIN_PODS   = 2        ; proportional：ocp-g 至少以此 pod 數計權重，避免 Knative 縮回後拿不到流量
+BURST_RECONCILE_SECONDS = 15    ; proportional：重新計算權重的間隔
+; ocp-g Knative
+KNATIVE_MAX_SCALE    = 20
+
+[loadtest]
+; load-test.sh 的預設值（命令列參數可覆蓋）
+LOAD_CONCURRENCY = 150
+LOAD_DURATION    = 900
+LOAD_BURN_MS     = 1000

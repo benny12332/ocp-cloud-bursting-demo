@@ -6,7 +6,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: postgres-ssl-cfg
-  namespace: bursting-demo
+  namespace: ${NAMESPACE}
 data:
   ssl.cfg: |
     ssl = on
@@ -17,7 +17,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: postgres
-  namespace: bursting-demo
+  namespace: ${NAMESPACE}
   labels:
     app: postgres
 spec:
@@ -74,7 +74,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: postgres
-  namespace: bursting-demo
+  namespace: ${NAMESPACE}
 spec:
   selector:
     app: postgres
@@ -88,9 +88,9 @@ apiVersion: route.openshift.io/v1
 kind: Route
 metadata:
   name: postgres
-  namespace: bursting-demo
+  namespace: ${NAMESPACE}
 spec:
-  host: db.bursting.demo.example.com   # ← 改成你的 domain
+  host: ${DB_HOST}
   to:
     kind: Service
     name: postgres

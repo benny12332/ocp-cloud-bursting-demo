@@ -1,0 +1,42 @@
+# 給 ocp-a 的 burst-controller 讀 ocp-g pod 數用的唯讀 ServiceAccount（proportional 模式需要）
+# apply 後執行 scripts/setup-reader.sh 會把 token 帶到 ocp-a 的 secret ocp-g-reader
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: burst-reader
+  namespace: ${NAMESPACE}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: burst-reader
+  namespace: ${NAMESPACE}
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: burst-reader
+  namespace: ${NAMESPACE}
+subjects:
+  - kind: ServiceAccount
+    name: burst-reader
+    namespace: ${NAMESPACE}
+roleRef:
+  kind: Role
+  name: burst-reader
+  apiGroup: rbac.authorization.k8s.io
+---
+# 長效 token（K8s 1.24+ 不再自動產生，需明確宣告）
+apiVersion: v1
+kind: Secret
+metadata:
+  name: burst-reader-token
+  namespace: ${NAMESPACE}
+  annotations:
+    kubernetes.io/service-account.name: burst-reader
+type: kubernetes.io/service-account-token

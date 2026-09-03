@@ -1,0 +1,7 @@
+# 個人參數（含 AWS 金鑰），只 commit demo.ini.example
+demo.ini
+# render.sh 產生的套用版 manifest
+rendered/
+# 暫存憑證
+*.key
+*.crt

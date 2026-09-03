@@ -1,72 +1,56 @@
 # burst-controller：接收 Alertmanager webhook，呼叫 Route 53 API 調整加權
-#   firing   → ocp-a:50 / ocp-g:50 （開始分流）
-#   resolved → ocp-a:100 / ocp-g:0 （回縮；ocp-g 沒流量後 Knative 自動歸零）
-# 前置：oc create secret generic aws-route53 --from-literal=AWS_ACCESS_KEY_ID=... --from-literal=AWS_SECRET_ACCESS_KEY=...
+#   firing   → 進入 bursting：先用起手權重（BURST_AWS_WEIGHT / BURST_GCP_WEIGHT）把流量推到 ocp-g 喚醒 Knative，
+#              之後每 RECONCILE_SECONDS 依「兩邊 ready pod 數」比例動態調整權重（BURST_MODE=proportional）
+#   resolved → ocp-a:100 / ocp-g:0（回縮；ocp-g 沒流量後 Knative 自動歸零）
+#
+# 要讀 ocp-g 的 pod 數，需要 secret ocp-g-reader（OCP_G_API / OCP_G_TOKEN / OCP_G_CA），
+# 由 scripts/setup-reader.sh 建立；沒有這個 secret 時退回 fixed 模式。
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: burst-controller
+  namespace: ${NAMESPACE}
+---
+# 讀本地（ocp-a）frontend pod 數
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: burst-controller
+  namespace: ${NAMESPACE}
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: burst-controller
+  namespace: ${NAMESPACE}
+subjects:
+  - kind: ServiceAccount
+    name: burst-controller
+    namespace: ${NAMESPACE}
+roleRef:
+  kind: Role
+  name: burst-controller
+  apiGroup: rbac.authorization.k8s.io
 ---
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: burst-controller-code
-  namespace: bursting-demo
+  namespace: ${NAMESPACE}
 data:
   controller.py: |
-    import os, json, boto3
-    from flask import Flask, request, jsonify
-
-    app = Flask(__name__)
-    ZONE = os.environ["HOSTED_ZONE_ID"]
-    RECORD = os.environ["RECORD_NAME"]          # 例 app.bursting.demo.example.com.
-    AWS_TARGET = os.environ["AWS_TARGET"]        # 例 app-aws.bursting.demo.example.com.
-    GCP_TARGET = os.environ["GCP_TARGET"]        # 例 app-gcp.bursting.demo.example.com.
-    TTL = int(os.environ.get("TTL", "15"))
-    r53 = boto3.client("route53")
-    state = {"mode": "normal"}
-
-    def upsert(identifier, target, weight):
-        return {
-            "Action": "UPSERT",
-            "ResourceRecordSet": {
-                "Name": RECORD, "Type": "CNAME", "TTL": TTL,
-                "SetIdentifier": identifier, "Weight": weight,
-                "ResourceRecords": [{"Value": target}],
-            },
-        }
-
-    def set_weights(aws_w, gcp_w):
-        r53.change_resource_record_sets(
-            HostedZoneId=ZONE,
-            ChangeBatch={"Changes": [
-                upsert("ocp-a", AWS_TARGET, aws_w),
-                upsert("ocp-g", GCP_TARGET, gcp_w),
-            ]},
-        )
-        print(f"weights set: ocp-a={aws_w} ocp-g={gcp_w}", flush=True)
-
-    @app.route("/alert", methods=["POST"])
-    def alert():
-        payload = request.get_json(force=True)
-        status = payload.get("status", "unknown")
-        names = [a.get("labels", {}).get("alertname") for a in payload.get("alerts", [])]
-        print(f"webhook received: status={status} alerts={names}", flush=True)
-        if status == "firing":
-            set_weights(50, 50)
-            state["mode"] = "bursting"
-        elif status == "resolved":
-            set_weights(100, 0)
-            state["mode"] = "normal"
-        return jsonify(ok=True, mode=state["mode"])
-
-    @app.route("/status")
-    def status():
-        return jsonify(state)
-
-    app.run(host="0.0.0.0", port=8080)
+${CONTROLLER_CODE}
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: burst-controller
-  namespace: bursting-demo
+  namespace: ${NAMESPACE}
   labels:
     app: burst-controller
 spec:
@@ -79,27 +63,45 @@ spec:
       labels:
         app: burst-controller
     spec:
+      serviceAccountName: burst-controller
       containers:
         - name: controller
           image: registry.access.redhat.com/ubi9/python-311:latest
           command:
             - /bin/sh
             - -c
-            - pip install --quiet flask boto3 && python /opt/app/controller.py
+            - pip install --quiet flask boto3 requests && python /opt/app/controller.py
           env:
             - name: HOSTED_ZONE_ID
-              value: "ZXXXXXXXXXXXXX"                        # ← 改成你的 hosted zone ID
+              value: "${HOSTED_ZONE_ID}"
             - name: RECORD_NAME
-              value: "app.bursting.demo.example.com."         # ← 改
+              value: "${RECORD_NAME}"
             - name: AWS_TARGET
-              value: "app-aws.bursting.demo.example.com."     # ← 改
+              value: "${AWS_TARGET}"
             - name: GCP_TARGET
-              value: "app-gcp.bursting.demo.example.com."     # ← 改
+              value: "${GCP_TARGET}"
+            - name: TTL
+              value: "${DNS_TTL}"
             - name: AWS_DEFAULT_REGION
-              value: us-east-1
+              value: "${AWS_REGION}"
+            - name: NAMESPACE
+              value: "${NAMESPACE}"
+            - name: BURST_MODE
+              value: "${BURST_MODE}"
+            - name: BURST_AWS_WEIGHT
+              value: "${BURST_AWS_WEIGHT}"
+            - name: BURST_GCP_WEIGHT
+              value: "${BURST_GCP_WEIGHT}"
+            - name: BURST_GCP_MIN_PODS
+              value: "${BURST_GCP_MIN_PODS}"
+            - name: RECONCILE_SECONDS
+              value: "${BURST_RECONCILE_SECONDS}"
           envFrom:
             - secretRef:
-                name: aws-route53
+                name: aws-route53          # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
+            - secretRef:
+                name: ocp-g-reader         # OCP_G_API / OCP_G_TOKEN / OCP_G_CA（setup-reader.sh 建立）
+                optional: true
           ports:
             - containerPort: 8080
           resources:
@@ -116,7 +118,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: burst-controller
-  namespace: bursting-demo
+  namespace: ${NAMESPACE}
 spec:
   selector:
     app: burst-controller

@@ -2,18 +2,19 @@
 # 壓測腳本：打前端 /burn 端點燒 CPU
 # 流程：HPA 加 replica → worker 節點 CPU 飆高 → ClusterCPUPressure firing → 分流到 ocp-g
 #
-# 用法:
-#   ./load-test.sh <URL> [併發數] [持續秒數] [每請求燒CPU毫秒]
-#   ./load-test.sh http://app.bursting.demo.example.com 100 600 800
+# 用法（全部可省略，預設取 demo.ini 的 APP_HOST 與 [loadtest]）:
+#   ./load-test.sh [URL] [併發數] [持續秒數] [每請求燒CPU毫秒]
+#   ./load-test.sh                       # 用 demo.ini 預設
+#   ./load-test.sh http://x.y.z 100 600 800
 #
 # 有裝 hey (https://github.com/rakyll/hey) 就用 hey，沒有就退回純 curl 迴圈。
-
 set -euo pipefail
+source "$(dirname "$0")/env.sh"
 
-URL="${1:?用法: $0 <URL> [併發] [秒數] [burn_ms]}"
-CONCURRENCY="${2:-100}"
-DURATION="${3:-600}"
-BURN_MS="${4:-800}"
+URL="${1:-$APP_URL}"
+CONCURRENCY="${2:-$LOAD_CONCURRENCY}"
+DURATION="${3:-$LOAD_DURATION}"
+BURN_MS="${4:-$LOAD_BURN_MS}"
 
 TARGET="${URL%/}/burn?ms=${BURN_MS}"
 
@@ -25,7 +26,7 @@ echo "==========================="
 
 if command -v hey >/dev/null 2>&1; then
   echo "[使用 hey]"
-  # DNS TTL 15s；hey 只解析一次 DNS，所以分段跑，每 30 秒重新解析
+  # DNS TTL 很短；hey 只解析一次 DNS，所以分段跑，每 30 秒重新解析
   # 讓分流生效後新的連線會打到 ocp-g
   END=$(( $(date +%s) + DURATION ))
   while [ "$(date +%s)" -lt "$END" ]; do

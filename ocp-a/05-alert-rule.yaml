@@ -17,10 +17,10 @@ spec:
               rate(node_cpu_seconds_total{mode="idle"}[2m])
               * on(instance) group_left()
                 (max by (instance) (label_replace(kube_node_role{role="worker"}, "instance", "$1", "node", "(.+)")))
-            )) * 100 > 65
-          for: 2m
+            )) * 100 > ${CPU_PRESSURE_PERCENT}
+          for: ${CPU_PRESSURE_FOR}
           labels:
             severity: warning
             demo: bursting
           annotations:
-            summary: "Worker 節點平均 CPU 超過 65%，觸發 cloud bursting 分流到 ocp-g"
+            summary: "Worker 節點平均 CPU 超過 ${CPU_PRESSURE_PERCENT}%，觸發 cloud bursting 分流到 ocp-g"
